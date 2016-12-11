@@ -36,5 +36,4 @@ class LaravelToken extends AbstractToken
     {
         return '';
     }
-
 }
