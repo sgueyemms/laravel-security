@@ -1,15 +1,15 @@
 <?php namespace Barryvdh\Security;
 
+use Illuminate\Auth\Events;
 use Illuminate\Support\ServiceProvider;
 
 use Barryvdh\Security\Authentication\AuthenticationManager;
-use Barryvdh\Security\Authorization\Voter\AuthVoter;
 use Barryvdh\Security\Authentication\Token\LaravelToken;
 
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
 use Symfony\Component\Security\Core\SecurityContext;
-use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage as SfTokenStorage;
 use Symfony\Component\Security\Core\Authorization\AuthorizationChecker;
-use Symfony\Component\Security\Core\Authorization\Voter\RoleHierarchyVoter;
 use Symfony\Component\Security\Core\Authorization\AccessDecisionManager;
 use Symfony\Component\Security\Core\Role\RoleHierarchy;
 
@@ -54,42 +54,59 @@ class SecurityServiceProvider extends ServiceProvider {
             });
 
         $app['security.token_storage'] = $app->share(function($app) {
-                $tokenStorage = new TokenStorage();
-                $tokenStorage->setToken(new LaravelToken($app['auth']->user()));
-                return $tokenStorage;
-            });
+            /*
+             * Issues with the user in the token being empty and Laravel never firing the
+             * Events\Authenticate.
+             * So I replaced the storage with one that takes a token generator that lets it delay the
+             * token creation until it is needed.
+             * If for some reason the token is requested too early we might run into the same issue.
+             * This is not a satisfying fix because this kind of "race condition" should never happen
+             */
+            $tokenStorage = new TokenStorage(
+                function () use ($app) { return new LaravelToken($app['auth']->user()); }
+            );
+            return $tokenStorage;
+        });
 
         $app['security.authorization_checker'] = $app->share(function ($app) {
-                return new AuthorizationChecker($app['security.token_storage'], $app['security.authentication_manager'], $app['security.access_manager']);
-            });
-        $app->alias('security.authorization_checker', 'Symfony\Component\Security\Core\Authorization\AuthorizationChecker');
+            return new AuthorizationChecker(
+                $app['security.token_storage'],
+                $app['security.authentication_manager'],
+                $app['security.access_manager']
+            );
+        });
+        $app->alias('security.authorization_checker', AuthorizationCheckerInterface::class);
 
         $app['security.authentication_manager'] = $app->share(function ($app) {
-                return new AuthenticationManager();
-            });
+            return new AuthenticationManager();
+        });
 
         $app['security.access_manager'] = $app->share(function ($app) {
-                return new AccessDecisionManager($app['security.voters'], $app['security.strategy']);
-            });
+            return new AccessDecisionManager($app['security.voters'], $app['security.strategy']);
+        });
 
         $app->bind('Symfony\Component\Security\Core\Role\RoleHierarchyInterface', function($app) {
-                return new RoleHierarchy($app['security.role_hierarchy']);
-            });
+            return new RoleHierarchy($app['security.role_hierarchy']);
+        });
 
         $app['security.voters'] = $app->share(function ($app) {
-                return array_map(function($voter) use ($app) {
-                    return $app->make($voter);
-                }, $app['config']->get('security.voters'));
-            });
+            return array_map(function($voter) use ($app) {
+                return $app->make($voter);
+            }, $app['config']->get('security.voters'));
+        });
 
         //Listener for Login event
-        $app['events']->listen('auth.login', function($user) use($app){
-                $app['security.token_storage']->setToken(new LaravelToken($user));
-            });
-
-        $app['events']->listen('auth.logout', function() use($app){
-                $app['security.token_storage']->setToken(new LaravelToken(null));
-            });
+        $app['events']->listen(Events\Login::class, function(Events\Login $event) use($app){
+            $app['security.token_storage']->setToken(new LaravelToken($event->user));
+        });
+        //Listener for authenticated events
+        $app['events']->listen(Events\Authenticated::class, function(Events\Authenticated $event) use($app){
+            //pyk_die($event->user."");
+        });
+        //Listener for logout events
+        $app['events']->listen(Events\Logout::class, function(Events\Logout $event) use($app){
+            $app['security.token_storage']->setToken(new LaravelToken(null));
+        });
 	}
 
 
@@ -100,7 +117,14 @@ class SecurityServiceProvider extends ServiceProvider {
 	 */
 	public function provides()
 	{
-		return array('security', 'security.role_hierarchy' , 'security.authentication_manager', 'security.access_manager', 'security.voters', 'security.authorization_checker' );
+		return array(
+		    'security',
+            'security.role_hierarchy' ,
+            'security.authentication_manager',
+            'security.access_manager',
+            'security.voters',
+            'security.authorization_checker'
+        );
 	}
 
 }
